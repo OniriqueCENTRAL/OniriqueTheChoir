@@ -95,6 +95,41 @@ int main (int argc, char** argv)
         check (voiced > (int) render->lead.size() / 2, "hauteur suivie sur la voix");
     }
 
+    // tonalité proposée dès le chargement, sans toucher aux réglages
+    check (proc->suggestedKey() == 0 && proc->suggestedScale() == 0,
+           "tonalité proposée après le chargement : " + (proc->suggestedKey() >= 0 ? keyNames[proc->suggestedKey()] : juce::String ("aucune")));
+
+    // presets : tout le chœur change, la tonalité du morceau reste
+    {
+        auto setRaw = [&] (const char* id, float v) { auto* p = proc->apvts.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+        setRaw (ids::key, 2.0f);   // D
+        proc->applyPreset (5);     // Gang Chant
+        check ((int) proc->apvts.getRawParameterValue (ids::model)->load() == 3 && proc->apvts.getRawParameterValue (ids::octDownOn)->load() > 0.5f
+                   && proc->apvts.getRawParameterValue (ids::voiceOn[0])->load() < 0.5f,
+               "preset GANG CHANT appliqué");
+        check ((int) proc->apvts.getRawParameterValue (ids::key)->load() == 2, "preset : tonalité du morceau gardée");
+        proc->applySuggestedKey();
+        check ((int) proc->apvts.getRawParameterValue (ids::key)->load() == 0, "APPLY : tonalité proposée appliquée");
+        proc->applyPreset (0);     // Sunday Gospel
+        check (waitForRender (*proc, 20000), "harmonies recalculées après le preset");
+    }
+
+    // ▶ dans le plugin, DAW à l'arrêt : voix + chœur
+    {
+        FakePlayHead stopped;
+        stopped.playing = false;
+        proc->setPlayHead (&stopped);
+        proc->setPreview (true);
+        juce::AudioBuffer<float> pv (2, 512);
+        juce::MidiBuffer m;
+        double e = 0.0;
+        for (int b = 0; b < 100; ++b) { pv.clear(); proc->processBlock (pv, m); e += rms (pv); }
+        check (e / 100.0 > 0.01, "PLAY : voix et chœur sans lancer le DAW");
+        check (proc->previewSeconds() > 0.9, "PLAY : la lecture avance (" + juce::String (proc->previewSeconds(), 2) + " s)");
+        proc->setPreview (false);
+        proc->setPlayHead (nullptr);
+    }
+
     check (proc->detectKey(), "tonalité détectée");
     const int key = (int) proc->apvts.getRawParameterValue (ids::key)->load();
     const int scaleIdx = (int) proc->apvts.getRawParameterValue (ids::scale)->load();

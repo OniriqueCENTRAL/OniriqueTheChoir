@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Presets.h"
 
 using namespace onirique;
 
@@ -96,6 +97,8 @@ std::shared_ptr<ChoirRender> renderClip (const ChoirClip& clip, const ChoirEngin
 } // namespace
 
 //==============================================================================
+static std::pair<int, int> analyseKey (const ChoirRender&);
+
 // Rendu des harmonies d'un clip en tâche de fond, relancé à chaque réglage (après 250 ms de calme).
 class OniriqueTheChoirAudioProcessor::RenderThread : public juce::Thread
 {
@@ -122,6 +125,13 @@ public:
                 auto r = renderClip (*c, owner.readSettings(), [this] { return threadShouldExit() || owner.renderDirty.load(); });
                 if (r != nullptr)
                 {
+                    // voix tout juste chargée ou enregistrée : la tonalité détectée est proposée
+                    if (owner.keyPending.exchange (false))
+                    {
+                        const auto [k, s] = analyseKey (*r);
+                        owner.suggestScale = s;
+                        owner.suggestKey = k;
+                    }
                     std::shared_ptr<const ChoirRender> old;   // libéré ici, jamais dans le thread audio
                     const juce::SpinLock::ScopedLockType sl (owner.clipLock);
                     if (owner.clip == c) { old = std::move (owner.render); owner.render = std::move (r); }
@@ -210,6 +220,10 @@ ChoirEngine::Settings OniriqueTheChoirAudioProcessor::readSettings() const
     }
     s.voices[4] = { raw (ids::octDownOn) > 0.5f, 0, -1, dbToGain (raw (ids::octDownLvl)), 0.0f };
     s.voices[5] = { raw (ids::octUpOn) > 0.5f, 0, 1, dbToGain (raw (ids::octUpLvl)), 0.0f };
+    s.model = choirModels[juce::jlimit (0, kNumModels - 1, (int) raw (ids::model))];
+    s.mic = juce::jlimit (0, kNumMics - 1, (int) raw (ids::mic));
+    s.room = raw (ids::room) / 100.0f;
+    s.mono = raw (ids::stereo) > 0.5f;
     return s;
 }
 
@@ -299,17 +313,28 @@ void OniriqueTheChoirAudioProcessor::processBlock (juce::AudioBuffer<float>& buf
     else
     {
         // mode CLIP : harmonies (et voix du fichier glissé) rejouées à la position du DAW
+        // ▶ dans le plugin (DAW à l'arrêt) : le clip est rejoué depuis son début, voix comprise
+        if (previewRestart.exchange (false)) previewIdx = 0.0;
+        const bool preview = previewOn.load() && ! isPlaying;
+        if (isPlaying && previewOn.load()) previewOn = false;   // le DAW reprend la main
         const juce::SpinLock::ScopedTryLockType sl (clipLock);
-        if (sl.isLocked() && isPlaying && render != nullptr)
+        if (sl.isLocked() && (isPlaying || preview) && render != nullptr)
         {
             const auto& rd = *render;
             const int len = rd.harmonies.getNumSamples();
             const float* hl = rd.harmonies.getReadPointer (0);
             const float* hr = rd.harmonies.getReadPointer (1);
-            const float* voice = (clip != nullptr && clip->fromFile && clip->voice.getNumSamples() > 0) ? clip->voice.getReadPointer (0) : nullptr;
+            const bool playVoice = clip != nullptr && (clip->fromFile || preview) && clip->voice.getNumSamples() > 0;
+            const float* voice = playVoice ? clip->voice.getReadPointer (0) : nullptr;
             const int voiceLen = voice != nullptr ? clip->voice.getNumSamples() : 0;
             const double step = rd.sampleRate / sampleRate;
-            double idx = (timeSec - rd.startSeconds) * rd.sampleRate;
+            double idx = preview ? previewIdx : (timeSec - rd.startSeconds) * rd.sampleRate;
+            if (preview)
+            {
+                previewIdx += step * n;
+                previewSec = previewIdx / rd.sampleRate;
+                if (previewIdx >= (double) len) { previewOn = false; previewIdx = 0.0; }
+            }
             for (int i = 0; i < n; ++i, idx += step)
             {
                 if (idx < 0.0 || idx >= (double) (len - 1)) continue;
@@ -454,6 +479,9 @@ void OniriqueTheChoirAudioProcessor::setClip (std::shared_ptr<ChoirClip> c)
         clip = std::move (c);
     }
     const bool any = hasClip();
+    previewOn = false;
+    suggestKey = -1;            // nouvelle voix : sa tonalité sera proposée après le premier rendu
+    keyPending = any;
     auto* src = apvts.getParameter (ids::source);
     src->setValueNotifyingHost (src->convertTo0to1 (any ? 1.0f : 0.0f));
     if (any) { renderDirty = true; renderDirtyAt = 0; }   // rendu tout de suite
@@ -479,11 +507,11 @@ std::shared_ptr<const ChoirRender> OniriqueTheChoirAudioProcessor::currentRender
     return render;
 }
 
-// tonalité : profils de Krumhansl-Schmuckler sur la durée de chaque classe de hauteur chantée
-bool OniriqueTheChoirAudioProcessor::detectKey()
+// tonalité : profils de Krumhansl-Schmuckler sur la durée de chaque classe de hauteur chantée.
+// Rend { tonique, gamme (0 majeure, 1 mineure) }, ou { -1, 0 } si rien n'est chanté.
+static std::pair<int, int> analyseKey (const ChoirRender& rd)
 {
-    const auto r = currentRender();
-    if (r == nullptr) return false;
+    const auto* r = &rd;
     std::array<double, 12> hist {};
     double total = 0.0;
     for (size_t f = 0; f < r->lead.size(); ++f)
@@ -494,7 +522,7 @@ bool OniriqueTheChoirAudioProcessor::detectKey()
         hist[(size_t) pc] += w;
         total += w;
     }
-    if (total <= 0.0) return false;
+    if (total <= 0.0) return { -1, 0 };
 
     static constexpr double major[] { 6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88 };
     static constexpr double minor[] { 6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17 };
@@ -518,10 +546,65 @@ bool OniriqueTheChoirAudioProcessor::detectKey()
         if (const double c = corr (major, k); c > best) { best = c; bestKey = k; bestScale = 0; }
         if (const double c = corr (minor, k); c > best) { best = c; bestKey = k; bestScale = 1; }
     }
-    auto set = [this] (const char* id, float v) { auto* p = apvts.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
-    set (ids::key, (float) bestKey);
-    set (ids::scale, (float) bestScale);
+    return { bestKey, bestScale };
+}
+
+static void setParam (juce::AudioProcessorValueTreeState& apvts, const char* id, float value)
+{
+    if (auto* p = apvts.getParameter (id)) p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
+
+bool OniriqueTheChoirAudioProcessor::detectKey()
+{
+    const auto r = currentRender();
+    if (r == nullptr) return false;
+    const auto [k, s] = analyseKey (*r);
+    if (k < 0) return false;
+    setParam (apvts, ids::key, (float) k);
+    setParam (apvts, ids::scale, (float) s);
     return true;
+}
+
+void OniriqueTheChoirAudioProcessor::applySuggestedKey()
+{
+    const int k = suggestKey.load();
+    if (k < 0) return;
+    setParam (apvts, ids::key, (float) k);
+    setParam (apvts, ids::scale, (float) suggestScale.load());
+}
+
+void OniriqueTheChoirAudioProcessor::applyPreset (int index)
+{
+    const auto& list = factoryPresets();
+    if (index < 0 || index >= (int) list.size()) return;
+    // tout le chœur repart des valeurs par défaut ; la source, la tonalité et le bypass ne bougent pas
+    for (auto* p : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+        {
+            const auto id = rp->getParameterID();
+            if (id == ids::source || id == ids::key || id == ids::scale || id == ids::bypass) continue;
+            rp->setValueNotifyingHost (rp->getDefaultValue());
+        }
+    for (const auto& [id, value] : list[(size_t) index].values)   // PresetValue { id, value }
+        setParam (apvts, id, value);
+    apvts.state.setProperty ("preset", index, nullptr);
+}
+
+int OniriqueTheChoirAudioProcessor::currentPreset() const
+{
+    return (int) apvts.state.getProperty ("preset", -1);
+}
+
+void OniriqueTheChoirAudioProcessor::setPreview (bool shouldPlay)
+{
+    if (shouldPlay && currentRender() == nullptr) return;
+    if (shouldPlay)
+    {
+        setParam (apvts, ids::source, 1.0f);   // le clip passe en mode CLIP
+        previewSec = 0.0;
+        previewRestart = true;
+    }
+    previewOn = shouldPlay;
 }
 
 juce::File OniriqueTheChoirAudioProcessor::exportHarmonies (juce::String& error)

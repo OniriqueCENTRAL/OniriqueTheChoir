@@ -4,7 +4,7 @@ Harmonies vocales dans la tonalité, à partir d'une voix. Même DA que ONIRIQUE
 
 ## Utilisation
 - **LIVE** : le plugin harmonise ce qui arrive (la piste de voix pendant que le DAW joue, ou un micro). Latence
-  d'environ 58 ms, annoncée au DAW qui la compense.
+  d'environ 75 ms (48 kHz), annoncée au DAW qui la compense.
 - **CLIP** : la voix est dans le plugin, les harmonies sont calculées une fois, en tâche de fond, puis rejouées
   en synchro avec la ligne de temps du DAW (latence nulle).
   - glisser un fichier audio (WAV, AIFF, FLAC, MP3...) sur l'afficheur, ou **LOAD** : le fichier démarre au
@@ -48,3 +48,14 @@ Mac : `cmake -B build -G Xcode` (binaire universel Intel + Apple Silicon, VST3 +
 Chaque envoi sur `main` compile Mac + Windows et publie la version dans ONIRIQUE CENTRAL (voir
 `.github/workflows/build.yml`). Le message du commit devient la note de version : l'écrire pour les clients,
 et ajouter `[skip ci]` pour un changement interne.
+
+## Chœurs, micros, presets
+- **MODEL** (`choirModels` dans `Source/Parameters.h`) : chaque voix d'harmonie est chantée par plusieurs choristes,
+  chacun avec son retard, son léger désaccord, son timbre (formants) et sa place stéréo.
+  STUDIO (1 voix propre), GOSPEL (3 choristes + section à l'unisson, salle), CHILDREN (une octave plus haut,
+  formants x1,24 : voix d'enfants), GANG (foule d'hommes à l'unisson, attaques éparpillées, saturation).
+- **MIC** (`mics`) : couleur du chœur (CLEAN, U67, U47, C414, SM7B, RIBBON), trois filtres.
+- **ROOM** : salle (juce::Reverb) ; **OUT** : chœur stéréo ou mono.
+- **Presets** (`Source/Presets.h`) : chœurs complets ; un preset ne touche pas à la tonalité du morceau.
+- **PLAY** : écoute du clip et de son chœur dans le plugin, DAW à l'arrêt.
+- **Tonalité proposée** : calculée au premier rendu d'une voix chargée ou enregistrée ; bouton APPLY.

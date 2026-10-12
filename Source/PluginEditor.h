@@ -126,6 +126,21 @@ private:
     ActionButton loadButton { "LOAD", "Load a vocal file (WAV, AIFF, FLAC, MP3...). You can also drag a file onto the display." };
     ActionButton clearButton { "CLEAR", "Remove the voice from the plugin and go back to LIVE." };
     ActionButton detectButton { "DETECT KEY", "Detect the key of the voice and set KEY and SCALE." };
+    ActionButton previewButton { "PLAY", "Listen to the voice and its choir right here, without starting your DAW." };
+
+    // presets
+    ActionButton presetPrev { "<", "Previous preset." }, presetNext { ">", "Next preset." };
+    ActionButton presetName { "PRESETS", "Factory choirs: click to choose one. The key and scale of your song are kept." };
+    void choosePreset();
+    void stepPreset (int delta);
+
+    // tonalité proposée après le chargement ou l'enregistrement d'une voix
+    ActionButton suggestButton { "", "Key detected in your voice: click to use it for the harmonies." };
+
+    // CHOIR
+    SegmentSelector modelSel, stereoSel;
+    DragValue micValue;
+    KnobComponent roomKnob;
     DragOutZone dragOut { processor };
 
     // KEY

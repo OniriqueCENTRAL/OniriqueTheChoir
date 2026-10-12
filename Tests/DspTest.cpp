@@ -23,11 +23,97 @@ float measure (const std::vector<float>& sig, double fs, int from, int to)
     std::sort (found.begin(), found.end());
     return found[found.size() / 2];
 }
+
+// centre de gravité du spectre (Hz) : plus haut = timbre plus clair / voix plus petite
+float spectralCentroid (const std::vector<float>& sig, double fs, int from, int to)
+{
+    constexpr int order = 12, n = 1 << order;
+    juce::dsp::FFT fft (order);
+    std::vector<float> buf ((size_t) n * 2);
+    double num = 0.0, den = 0.0;
+    for (int start = from; start + n < to; start += n / 2)
+    {
+        std::fill (buf.begin(), buf.end(), 0.0f);
+        for (int i = 0; i < n; ++i)
+            buf[(size_t) i] = sig[(size_t) (start + i)] * (0.5f - 0.5f * std::cos (2.0f * juce::MathConstants<float>::pi * (float) i / (float) n));
+        fft.performFrequencyOnlyForwardTransform (buf.data());
+        for (int k = 1; k < n / 2; ++k)
+        {
+            const double hz = k * fs / n, m = buf[(size_t) k];
+            num += hz * m;
+            den += m;
+        }
+    }
+    return den > 0.0 ? (float) (num / den) : 0.0f;
+}
+
+struct RunResult { std::vector<float> out; int latency = 0; };
+
+RunResult runEngine (const std::vector<float>& voice, double fs, const ChoirEngine::Settings& s)
+{
+    ChoirEngine eng;
+    eng.prepare (fs);
+    eng.setSettings (s);
+    const int n = (int) voice.size();
+    std::vector<float> l ((size_t) n), r ((size_t) n);
+    for (int i = 0; i < n; i += 512)
+        eng.process (voice.data() + i, l.data() + i, r.data() + i, juce::jmin (512, n - i));
+    RunResult res;
+    res.latency = eng.getLatency();
+    res.out.assign ((size_t) n, 0.0f);
+    for (int i = 0; i + res.latency < n; ++i) res.out[(size_t) i] = 0.5f * (l[(size_t) (i + res.latency)] + r[(size_t) (i + res.latency)]);
+    return res;
+}
 } // namespace
 
 int main()
 {
     int failures = 0;
+
+    // types de chœur : plusieurs choristes décalés et désaccordés, la hauteur reste juste ;
+    // CHILDREN monte d'une octave avec un timbre plus clair ; GANG (saturation) et la salle restent propres
+    {
+        const double fs = 48000.0;
+        const std::vector<float> notes { 60.0f, 64.0f, 67.0f };
+        const auto voice = synthVoice (fs, notes, 1.0, 25.0);
+        float studioCentroid = 0.0f;
+        for (int m = 0; m < kNumModels; ++m)
+        {
+            ChoirEngine::Settings s;
+            s.key = 0; s.scale = 0; s.tight = 1.0f; s.humanize = 0.3f; s.width = 1.0f;
+            s.model = choirModels[m];
+            s.model.leadSingers = 0;   // on mesure la voix d'harmonie seule
+            s.mic = 1;                 // U67
+            s.room = m == 3 ? 0.4f : 0.0f;
+            s.voices[0] = { true, 2, 0, 1.0f, 0.0f };   // tierce au-dessus
+            const auto res = runEngine (voice, fs, s);
+            const int up = 12 * choirModels[m].octaveShift;
+            const int expect[] { 64 + up, 67 + up, 71 + up };
+            std::cout << "CHOEUR " << choirModels[m].name << " :";
+            bool finite = true;
+            float peak = 0.0f;
+            for (auto v : res.out) { finite = finite && std::isfinite (v); peak = juce::jmax (peak, std::abs (v)); }
+            for (int k = 0; k < 3; ++k)
+            {
+                const float got = measure (res.out, fs, (int) ((k + 0.25) * fs), (int) ((k + 0.8) * fs));
+                const bool ok = std::abs (got - (float) expect[k]) < 0.3f;
+                if (! ok) ++failures;
+                std::cout << "  " << noteName (expect[k]) << " " << juce::String (got, 2) << (ok ? " ok" : " ECHEC");
+            }
+            const bool levelOk = finite && peak > 0.02f && peak < 2.0f;
+            if (! levelOk) ++failures;
+            const float centroid = spectralCentroid (res.out, fs, (int) (0.2 * fs), (int) (2.8 * fs));
+            if (m == 0) studioCentroid = centroid;
+            std::cout << "   crête " << juce::String (peak, 2) << (levelOk ? "" : " ECHEC") << "   centre spectral " << (int) centroid << " Hz" << std::endl;
+            if (m == 2)
+            {
+                const bool brighter = centroid > studioCentroid * 1.15f;
+                if (! brighter) ++failures;
+                std::cout << "  CHILDREN plus clair que STUDIO : " << (brighter ? "ok" : "ECHEC") << std::endl;
+            }
+        }
+    }
+
     for (const double fs : { 44100.0, 48000.0, 96000.0 })
     {
         const std::vector<float> notes { 60.0f, 64.0f, 67.0f };   // C4 E4 G4

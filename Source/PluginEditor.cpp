@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include <BinaryData.h>
+#include "Presets.h"
 
 using namespace onirique;
 
@@ -249,8 +250,9 @@ void ChoirDisplay::paint (juce::Graphics& g)
 
             // tête de lecture
             const double dur = (double) render->harmonies.getNumSamples() / render->sampleRate;
-            const double t = processor.playheadSeconds() - render->startSeconds;
-            if (processor.hostPlaying() && t >= 0.0 && t <= dur)
+            const bool preview = processor.isPreviewing();
+            const double t = preview ? processor.previewSeconds() : processor.playheadSeconds() - render->startSeconds;
+            if ((preview || processor.hostPlaying()) && t >= 0.0 && t <= dur)
             {
                 const float x = plot.getX() + plot.getWidth() * (float) (t / dur);
                 g.setColour (ui::ember.withAlpha (0.25f));
@@ -313,6 +315,14 @@ OniriqueTheChoirAudioProcessorEditor::OniriqueTheChoirAudioProcessorEditor (Onir
       sourceSel (p.apvts, ids::source, { "LIVE", "CLIP" },
                  { "LIVE: harmonizes what comes in, in real time (latency compensated by your DAW).",
                    "CLIP: plays harmonies rendered in high quality from the loaded or recorded voice, in sync with your DAW." }),
+      modelSel (p.apvts, ids::model, { "STUDIO", "GOSPEL", "CHILDREN", "GANG" },
+                { "STUDIO: one clean voice per harmony.",
+                  "GOSPEL: three singers per harmony plus a unison section, loose and warm, in a hall.",
+                  "CHILDREN: a children's choir: one octave up, with the smaller timbre of young voices.",
+                  "GANG: a crowd of men shouting in unison, scattered attacks, gritty and wide." }),
+      stereoSel (p.apvts, ids::stereo, { "ST", "MONO" }, { "Stereo choir.", "Mono choir, centred." }),
+      micValue (p.apvts, ids::mic, "Microphone colour applied to the choir: drag up/down or use the mouse wheel."),
+      roomKnob (p.apvts, ids::room, "ROOM", "0", "100", Layout::textBelow, "Room around the choir (from dry to a large hall).", lnf),
       keySel (p.apvts, ids::key, keyNames, {}),
       scaleValue (p.apvts, ids::scale, "Scale used for the harmonies: drag up/down or use the mouse wheel."),
       tightKnob (p.apvts, ids::tight, "TIGHT", "0", "100", Layout::textBelow,
@@ -343,6 +353,27 @@ OniriqueTheChoirAudioProcessorEditor::OniriqueTheChoirAudioProcessorEditor (Onir
         animated.push_back (a);
     keySel.setTitle ("KEY");
     scaleValue.setPrefix ("SCALE  ");
+    modelSel.setTitle ("MODEL", "Type of choir.");
+    stereoSel.setTitle ("OUT");
+    micValue.setPrefix ("MIC  ");
+    for (auto* c : std::initializer_list<juce::Component*> { &previewButton, &presetPrev, &presetName, &presetNext, &suggestButton,
+                                                             &modelSel, &stereoSel, &micValue, &roomKnob })
+        addAndMakeVisible (c);
+    for (auto* a : std::initializer_list<Animated*> { &previewButton, &presetPrev, &presetName, &presetNext, &suggestButton,
+                                                      &modelSel, &stereoSel, &micValue, &roomKnob })
+        animated.push_back (a);
+
+    previewButton.onClick = [this] { processor.setPreview (! processor.isPreviewing()); };
+    suggestButton.setActive (true);
+    presetPrev.onClick = [this] { stepPreset (-1); };
+    presetNext.onClick = [this] { stepPreset (1); };
+    presetName.onClick = [this] { choosePreset(); };
+    suggestButton.onClick = [this]
+    {
+        processor.applySuggestedKey();
+        showMessage ("Key applied: " + keyNames[juce::jlimit (0, 11, processor.suggestedKey())] + " "
+                     + juce::String (scales[processor.suggestedScale()].name));
+    };
 
     bypassButton.setTooltip ("Bypass: original voice only (latency kept).");
     bypassAttachment = std::make_unique<ButtonAttachment> (p.apvts, ids::bypass, bypassButton);
@@ -428,7 +459,24 @@ void OniriqueTheChoirAudioProcessorEditor::timerCallback()
     recordButton.setText (processor.isRecording() ? "STOP" : "RECORD");
     const bool clip = processor.hasClip();
     clearButton.setEnabled (clip);
-    detectButton.setEnabled (processor.currentRender() != nullptr);
+    const bool rendered = processor.currentRender() != nullptr;
+    detectButton.setEnabled (rendered);
+    previewButton.setEnabled (rendered);
+    previewButton.setActive (processor.isPreviewing());
+    previewButton.setText (processor.isPreviewing() ? "STOP" : "PLAY");
+
+    const int preset = processor.currentPreset();
+    const auto& presets = factoryPresets();
+    presetName.setText (preset >= 0 && preset < (int) presets.size()
+                            ? juce::String (presets[(size_t) preset].category) + "  -  " + presets[(size_t) preset].name
+                            : juce::String ("PRESETS"));
+
+    // tonalité proposée : visible tant qu'elle diffère des réglages
+    const int sk = processor.suggestedKey(), ss = processor.suggestedScale();
+    const bool differs = sk >= 0 && (sk != (int) processor.apvts.getRawParameterValue (ids::key)->load()
+                                     || ss != (int) processor.apvts.getRawParameterValue (ids::scale)->load());
+    suggestButton.setVisible (differs);
+    if (differs) suggestButton.setText ("SUGGESTED KEY  " + keyNames[sk] + " " + scales[juce::jlimit (0, kNumScales - 1, ss)].name + "  -  APPLY");
 
     for (auto* a : animated) a->tick();
 
@@ -471,6 +519,35 @@ void OniriqueTheChoirAudioProcessorEditor::chooseFile()
     });
 }
 
+void OniriqueTheChoirAudioProcessorEditor::choosePreset()
+{
+    const auto& presets = factoryPresets();
+    juce::PopupMenu menu;
+    menu.setLookAndFeel (&lnf);
+    juce::String category;
+    for (int i = 0; i < (int) presets.size(); ++i)
+    {
+        if (category != presets[(size_t) i].category)
+        {
+            category = presets[(size_t) i].category;
+            menu.addSectionHeader (category);
+        }
+        menu.addItem (i + 1, presets[(size_t) i].name, true, i == processor.currentPreset());
+    }
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&presetName).withMinimumWidth (presetName.getWidth()),
+                        [safe = juce::Component::SafePointer<OniriqueTheChoirAudioProcessorEditor> (this)] (int result)
+                        {
+                            if (safe != nullptr && result > 0) safe->processor.applyPreset (result - 1);
+                        });
+}
+
+void OniriqueTheChoirAudioProcessorEditor::stepPreset (int delta)
+{
+    const int count = (int) factoryPresets().size();
+    const int now = processor.currentPreset();
+    processor.applyPreset (now < 0 ? (delta > 0 ? 0 : count - 1) : (now + delta + count) % count);
+}
+
 //==============================================================================
 void OniriqueTheChoirAudioProcessorEditor::resized()
 {
@@ -479,7 +556,7 @@ void OniriqueTheChoirAudioProcessorEditor::resized()
     const float W = (float) getWidth();
     veils.setBounds (getLocalBounds());
     if (licenseOverlay != nullptr)
-        licenseOverlay->fit (getLocalBounds(), u, { 610, 22, 248, 26 });
+        licenseOverlay->fit (getLocalBounds(), u, { 466, 30, 248, 26 });
     processor.apvts.state.setProperty ("uiWidth", getWidth(), nullptr);
 
     auto R = [u] (float x, float y, float w, float h) { return juce::Rectangle<float> (x * u, y * u, w * u, h * u); };
@@ -489,6 +566,9 @@ void OniriqueTheChoirAudioProcessorEditor::resized()
     logoRect = R (22, 14, 64, 58);
     place (bypassButton, R (kBaseW - 22 - 120, 26, 120, 36));
     place (sourceSel, R (kBaseW - 22 - 120 - 14 - 250, 26, 250, 36));
+    place (presetPrev, R (732, 26, 36, 36));
+    place (presetName, R (774, 26, 250, 36));
+    place (presetNext, R (1030, 26, 36, 36));
     statusRect = R (22, 76, 900, 16);
 
     const float m = 22.0f, gap = 16.0f;
@@ -502,6 +582,7 @@ void OniriqueTheChoirAudioProcessorEditor::resized()
     place (clearButton, R (bx - 120 - 10 - 86, topY + 8, 86, 28));
     place (loadButton, R (bx - 120 - 10 - 86 - 10 - 86, topY + 8, 86, 28));
     place (recordButton, R (bx - 120 - 10 - 86 - 10 - 86 - 10 - 116, topY + 8, 116, 28));
+    place (previewButton, R (bx - 120 - 10 - 86 - 10 - 86 - 10 - 116 - 10 - 96, topY + 8, 96, 28));
     place (display, R (m + 14, topY + 44, voiceW - 28, topH - 44 - 66));
     place (dragOut, R (m + 14, topY + topH - 60, voiceW - 28, 48));
 
@@ -510,10 +591,11 @@ void OniriqueTheChoirAudioProcessorEditor::resized()
     sections.push_back ({ "KEY & SCALE", R (kx, topY, kw, topH) });
     place (keySel, R (kx + 14, topY + 46, kw - 28, 34));
     place (scaleValue, R (kx + 14, topY + 92, kw - 28, 32));
+    place (suggestButton, R (kx + 14, topY + 134, kw - 28, 30));
     const float knobW = (kw - 28) / 3.0f;
-    place (tightKnob, R (kx + 14, topY + 150, knobW, 210));
-    place (humanizeKnob, R (kx + 14 + knobW, topY + 150, knobW, 210));
-    place (widthKnob, R (kx + 14 + 2 * knobW, topY + 150, knobW, 210));
+    place (tightKnob, R (kx + 14, topY + 180, knobW, 190));
+    place (humanizeKnob, R (kx + 14 + knobW, topY + 180, knobW, 190));
+    place (widthKnob, R (kx + 14 + 2 * knobW, topY + 180, knobW, 190));
 
     // VOICES
     const float vy = topY + topH + gap, vh = 232.0f;
@@ -529,25 +611,30 @@ void OniriqueTheChoirAudioProcessorEditor::resized()
         place (*panKnob[(size_t) v], R (x + 14 + (vw - 28) * 0.5f, vy + 118, (vw - 28) * 0.5f, 106));
     }
 
-    // OCTAVES, MIX, OUTPUT
+    // CHOIR, OCTAVES, MIX, OUTPUT
     const float by = vy + vh + gap, bh = kBaseH - by - m;
-    const float ow = 560.0f, mw = 520.0f, outX = m + ow + gap + mw + gap, outW = kBaseW - m - outX;
-    sections.push_back ({ "OCTAVES", R (m, by, ow, bh) });
-    place (octDownPower, R (m + 16, by + 50, 26, 26));
-    place (octDownKnob, R (m + 50, by + 44, ow - 66, 38));
-    place (octUpPower, R (m + 16, by + 96, 26, 26));
-    place (octUpKnob, R (m + 50, by + 90, ow - 66, 38));
-    const float mx = m + ow + gap;
+    const float cw = 520.0f, ow = 380.0f, mw = 330.0f;
+    const float ox = m + cw + gap, mx = ox + ow + gap, outX = mx + mw + gap, outW = kBaseW - m - outX;
+    sections.push_back ({ "CHOIR", R (m, by, cw, bh) });
+    place (modelSel, R (m + 14, by + 44, cw - 28, 34));
+    place (micValue, R (m + 14, by + 88, (cw - 40) * 0.5f, 32));
+    place (stereoSel, R (m + 26 + (cw - 40) * 0.5f, by + 88, (cw - 40) * 0.5f, 32));
+    sections.push_back ({ "OCTAVES", R (ox, by, ow, bh) });
+    place (octDownPower, R (ox + 16, by + 50, 26, 26));
+    place (octDownKnob, R (ox + 50, by + 44, ow - 66, 38));
+    place (octUpPower, R (ox + 16, by + 96, 26, 26));
+    place (octUpKnob, R (ox + 50, by + 90, ow - 66, 38));
     sections.push_back ({ "MIX", R (mx, by, mw, bh) });
-    place (dryKnob, R (mx + 30, by + 34, (mw - 60) * 0.5f, bh - 40));
-    place (wetKnob, R (mx + 30 + (mw - 60) * 0.5f, by + 34, (mw - 60) * 0.5f, bh - 40));
+    const float mk = (mw - 24) / 3.0f;
+    place (dryKnob, R (mx + 12, by + 34, mk, bh - 40));
+    place (wetKnob, R (mx + 12 + mk, by + 34, mk, bh - 40));
+    place (roomKnob, R (mx + 12 + 2 * mk, by + 34, mk, bh - 40));
     sections.push_back ({ "OUTPUT", R (outX, by, outW, bh) });
     place (meter, R (outX + outW * 0.5f - 40, by + 38, 80, bh - 50));
 
     for (auto& k : { &tightKnob, &humanizeKnob, &widthKnob }) k->setMaxDiameter (96.0f * u);
     for (int v = 0; v < ids::kHarmonyVoices; ++v) { levelKnob[(size_t) v]->setMaxDiameter (62.0f * u); panKnob[(size_t) v]->setMaxDiameter (62.0f * u); }
-    dryKnob.setMaxDiameter (62.0f * u);
-    wetKnob.setMaxDiameter (62.0f * u);
+    for (auto& k : { &dryKnob, &wetKnob, &roomKnob }) k->setMaxDiameter (58.0f * u);
 
     if (logo.isValid())
     {

@@ -14,6 +14,10 @@ inline constexpr const char* width    = "width";      // largeur stéréo des vo
 inline constexpr const char* dry      = "dry";        // voix d'origine
 inline constexpr const char* wet      = "wet";        // harmonies
 inline constexpr const char* bypass   = "bypass";
+inline constexpr const char* model    = "model";      // type de chœur : STUDIO / GOSPEL / CHILDREN / GANG
+inline constexpr const char* mic      = "mic";        // couleur du micro sur le chœur
+inline constexpr const char* room     = "room";       // salle (réverbération) du chœur
+inline constexpr const char* stereo   = "stereo";     // sortie du chœur : ST / MONO
 
 inline constexpr int kHarmonyVoices = 4;
 inline const char* const voiceOn[kHarmonyVoices]       { "v1On", "v2On", "v3On", "v4On" };
@@ -50,6 +54,39 @@ inline constexpr ScaleDef scales[] {
 inline constexpr int kNumScales = (int) (sizeof (scales) / sizeof (scales[0]));
 inline constexpr int kChromatic = kNumScales - 1;
 
+// types de chœur : chaque voix d'harmonie est chantée par plusieurs choristes, chacun un peu décalé et désaccordé
+struct ChoirModelDef
+{
+    const char* name;
+    int singers;          // choristes par voix d'harmonie
+    int leadSingers;      // choristes qui doublent la voix chantée à l'unisson (0 = aucun)
+    int octaveShift;      // tout le chœur une octave plus haut (enfants)
+    float formant;        // 1 = timbre d'origine, > 1 voix plus petite (enfant), < 1 plus grande (homme)
+    float scatterMs;      // décalage maximal entre choristes
+    float detuneCents;    // désaccord maximal entre choristes
+    float leadGain;       // niveau des doublures à l'unisson
+    float drive;          // saturation (cris)
+};
+inline constexpr ChoirModelDef choirModels[] {
+    { "STUDIO",   1, 0, 0, 1.00f,  4.0f,  4.0f, 0.0f, 0.0f },
+    { "GOSPEL",   3, 2, 0, 1.00f, 22.0f, 11.0f, 0.6f, 0.0f },
+    { "CHILDREN", 3, 3, 1, 1.24f, 18.0f,  9.0f, 0.9f, 0.0f },
+    { "GANG",     5, 6, 0, 0.90f, 45.0f, 18.0f, 1.0f, 0.45f },
+};
+inline constexpr int kNumModels = (int) (sizeof (choirModels) / sizeof (choirModels[0]));
+
+// micros : couleur appliquée au chœur (grave, présence, aigu)
+struct MicDef { const char* name; float lowHz, lowDb, midHz, midDb, midQ, highHz, highDb; };
+inline constexpr MicDef mics[] {
+    { "CLEAN",  100.0f,  0.0f, 1000.0f, 0.0f, 0.7f, 8000.0f,  0.0f },
+    { "U67",    120.0f,  2.0f,  500.0f, 1.0f, 0.8f, 9000.0f,  1.5f },   // chaud, rond
+    { "U47",    110.0f,  2.5f, 2500.0f, -1.0f, 0.9f, 7000.0f, -1.5f },  // gras, aigus doux
+    { "C414",    90.0f, -1.0f, 3500.0f, 1.5f, 1.0f, 11000.0f, 3.0f },   // clair, détaillé
+    { "SM7B",   140.0f,  1.5f, 4500.0f, 3.0f, 1.2f, 10000.0f, -3.0f },  // présence radio, aigus coupés
+    { "RIBBON", 150.0f,  1.0f, 2000.0f, -1.5f, 0.7f, 6000.0f, -5.0f },  // sombre, vintage
+};
+inline constexpr int kNumMics = (int) (sizeof (mics) / sizeof (mics[0]));
+
 // intervalles d'une voix, en degrés de la gamme (0 = unisson, +2 = tierce au-dessus, -2 = tierce en dessous...)
 inline constexpr int intervalSteps[] { 0, 1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6 };
 inline const juce::StringArray intervalNames { "UNISON", "2ND UP", "3RD UP", "4TH UP", "5TH UP", "6TH UP", "7TH UP",
@@ -84,6 +121,14 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     ps.push_back (std::make_unique<P> (ParameterID { ids::dry, 1 }, "Dry", dbRange, 0.0f, db));
     ps.push_back (std::make_unique<P> (ParameterID { ids::wet, 1 }, "Harmonies", dbRange, -3.0f, db));
     ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { ids::bypass, 1 }, "Bypass", false));
+
+    StringArray modelNames, micNames;
+    for (const auto& m : choirModels) modelNames.add (m.name);
+    for (const auto& m : mics) micNames.add (m.name);
+    ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { ids::model, 1 }, "Choir Model", modelNames, 1));
+    ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { ids::mic, 1 }, "Microphone", micNames, 1));
+    ps.push_back (std::make_unique<P> (ParameterID { ids::room, 1 }, "Room", NormalisableRange<float> (0.0f, 100.0f, 1.0f), 30.0f, pct));
+    ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { ids::stereo, 1 }, "Output", StringArray { "ST", "MONO" }, 0));
 
     // voix par défaut : tierce et quinte au-dessus, tierce en dessous (une octave plus bas), quarte au-dessus coupée
     const int  defInt[ids::kHarmonyVoices] { 2, 4, 8, 3 };

@@ -78,6 +78,20 @@ public:
     juce::String clipName() const;
     std::shared_ptr<const ChoirRender> currentRender() const;   // nullptr tant qu'aucun rendu
     bool detectKey();                                             // tonalité du clip -> KEY / SCALE
+
+    // tonalité suggérée dès qu'une voix est chargée ou enregistrée (-1 = aucune)
+    int suggestedKey() const noexcept { return suggestKey.load(); }
+    int suggestedScale() const noexcept { return suggestScale.load(); }
+    void applySuggestedKey();
+
+    // presets d'usine (Presets.h) : tout le chœur, la tonalité du morceau est gardée
+    void applyPreset (int index);
+    int currentPreset() const;
+
+    // écoute du clip dans le plugin, DAW à l'arrêt
+    void setPreview (bool shouldPlay);
+    bool isPreviewing() const noexcept { return previewOn.load(); }
+    double previewSeconds() const noexcept { return previewSec.load(); }
     juce::File exportHarmonies (juce::String& error);             // fichier WAV des harmonies (glisser dans le DAW)
 
     double playheadSeconds() const noexcept { return playSeconds.load(); }
@@ -118,7 +132,11 @@ private:
     std::atomic<int> recLength { 0 };
     std::atomic<double> recRate { 48000.0 }, recStart { 0.0 };
 
-    std::atomic<bool> renderDirty { false }, renderBusy { false };
+    std::atomic<bool> renderDirty { false }, renderBusy { false }, keyPending { false };
+    std::atomic<int> suggestKey { -1 }, suggestScale { 0 };
+    std::atomic<bool> previewOn { false }, previewRestart { false };
+    std::atomic<double> previewSec { 0.0 };
+    double previewIdx = 0.0;   // position (échantillons du clip), thread audio
     std::atomic<juce::uint32> renderDirtyAt { 0 };
 
     std::atomic<double> playSeconds { 0.0 };
